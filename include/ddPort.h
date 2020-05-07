@@ -69,6 +69,10 @@ public:
     uint16_t portId() const { return _portId; }
     struct rte_eth_dev_tx_buffer* txBuffer() { return _txBuffer; }
     struct stats_* stats() { return &_stats; }
+    uint64_t rxStats() const { return _stats.rx; }
+    uint64_t txStats() const { return _stats.tx; }
+    uint64_t rxDropStats() const { return _stats.rxDropped; }
+    uint64_t txDropStats() const { return _stats.txDropped; }
     void incRxStats(uint64_t pkts) { _stats.rx += pkts; }
     void incTxStats(uint64_t pkts) { _stats.tx += pkts; }
     void incRxDropStats(uint64_t pkts) { _stats.rxDropped += pkts; }

@@ -17,6 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>
 */
 
 #include <csignal>
+#include <iomanip>
 #include <getopt.h>
 #include <stdarg.h>
 #include <rte_mbuf.h>
@@ -50,7 +51,7 @@ dataDiodeApp::dataDiodeApp() :
         _userPortMask(0), _corePortId(0),
         _corePortMode(PORTMODE_INVALID),
         _corePort(NULL), _sId(0), _peerSId(0),
-        _accessPort(NULL)
+        _accessPort(NULL), _timerPeriod(10000000)
 {
     bzero(&_peerCorePortEthAddr, sizeof(struct ether_addr));
     bzero(_lcoreQueueConf, sizeof(lcoreQueueConf));
@@ -209,27 +210,39 @@ dataDiodeApp::mainLoop()
                   << portId << std::endl;
     }
 
-    const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S *
+    const uint64_t drainTsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S *
                 BURST_TX_DRAIN_US;
-    uint64_t prev_tsc = 0;
+    volatile uint64_t prevTsc = 0, timerTsc = 0, curTsc = 0, diffTsc;
     while (!_forceQuit) {
-        uint64_t cur_tsc = rte_rdtsc();
+        curTsc = rte_rdtsc();
 
         // TX burst queue drain
-        uint64_t diff_tsc = cur_tsc - prev_tsc;
-        if (unlikely(diff_tsc > drain_tsc)) {
+        diffTsc = curTsc - prevTsc;
+        if (unlikely(diffTsc > drainTsc)) {
 
             for (ddPortMap::iterator it = _pMap.begin();
                  it != _pMap.end(); ++it) {
                 it->second->handleTx();
             }
-            prev_tsc = cur_tsc;
         }
         // Read packet from RX queues
         for (ddPortMap::iterator it = _pMap.begin();
              it != _pMap.end(); ++it) {
             it->second->handleTx();
         }
+        // do this only on master core and if timer is enabled
+        if (lCoreId == rte_get_master_lcore() && _timerPeriod > 0) {
+            // advance the timer
+            timerTsc += diffTsc;
+
+            // if timer has reached its timeout
+            if (unlikely(timerTsc >= _timerPeriod)) {
+                printStats();
+                // reset the timer
+                timerTsc = 0;
+            }
+        }
+        prevTsc = curTsc;
     }
     std::cout << "Exiting dataDiodeApp::mainLoop()" << std::endl;
 }
@@ -325,4 +338,46 @@ dataDiodeApp::corePortEthAddr() const
 {
     return _corePort->ethAddr();
 }
+
+void
+dataDiodeApp::printStats()
+{
+    uint64_t total_packets_dropped, total_packets_tx, total_packets_rx;
+    uint16_t colWidth = 15;
+
+    total_packets_dropped = 0;
+    total_packets_tx = 0;
+    total_packets_rx = 0;
+
+    const char clr[] = { 27, '[', '2', 'J', '\0' };
+    const char topLeft[] = { 27, '[', '1', ';', '1', 'H','\0' };
+
+        /* Clear screen and move to top left */
+    std::cout << clr << topLeft << std::endl;
+
+    std::cout << std::endl << "Press CTRL+C to quit the program" << std::endl;
+    std::cout << "===================== Data Diode IN4004 Traffic Statistics ======================"
+              << std::endl
+              << "Interface" << " | "
+              << std::setw(colWidth) << "Packets Recvd" << " | "
+              << std::setw(colWidth) << "Packets Sent" << " | "
+              << std::setw(colWidth) << "Rx Dropped" << " | "
+              << std::setw(colWidth) << "Tx Dropped |"
+              << std::endl
+              << "---------------------------------------------------------------------------------"
+              << std::endl;
+    for (ddPortMap::iterator it = _pMap.begin(); it != _pMap.end(); ++it) {
+        std::cout << " Port "
+                  << it->second->portId()
+                  << std::setw(colWidth) << it->second->rxStats()
+                  << std::setw(colWidth) << it->second->txStats()
+                  << std::setw(colWidth) << it->second->rxDropStats()
+                  << std::setw(colWidth) << it->second->txDropStats()
+                  << std::endl;
+    }
+    std::cout << std::endl
+              <<"================================================================================="
+              << std::endl;
+}
+
 

@@ -102,6 +102,7 @@ private:
     uint16_t _sId;
     uint16_t _peerSId;
     struct ether_addr _peerCorePortEthAddr;
+    uint64_t _timerPeriod;
 
 protected:
 
@@ -126,6 +127,9 @@ public:
         }
         return *_appPtr;
     }
+
+    // Print out statistics on packets dropped
+    void printStats();
 
     // accessors
     bool forceQuit() { return _forceQuit; }
