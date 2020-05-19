@@ -32,6 +32,10 @@ RTE_TARGET ?= x86_64-native-linuxapp-gcc
 include $(RTE_SDK)/mk/rte.vars.mk
 
 INCLUDES := -I../include/
+ifneq ($(_DD_TESTMODE_),)
+$(warning "Building the application in TEST mode. DO NOT use the binary in production")
+CXXFLAGS += -D _DD_TESTMODE_
+endif
 CXXFLAGS += -O3 $(INCLUDES)
 #CXXFLAGS += $(WERROR_FLAGS)
 LDFLAGS += -lstdc++

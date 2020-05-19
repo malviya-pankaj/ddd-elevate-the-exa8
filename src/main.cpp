@@ -29,6 +29,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>
 int
 main (int argc, char **argv)
 {
+    dataDiodeApp &app = dataDiodeApp::instance();
+
+    if (argc == 1) {
+        app.usage(argv[0]);
+        return 1;
+    }
+
     // open configuration files
     // configuration file names are hardcoded for security purposes
     std::FILE* inputFile = std::fopen("/etc/dataDiodeApp/sid.conf", "r");
@@ -68,10 +75,32 @@ main (int argc, char **argv)
     peerMac.addr_bytes[5] = static_cast<uint8_t>(pM[5] & 0xFF);
     std::fclose(inputFile);
 
-    dataDiodeApp &app = dataDiodeApp::instance();
+#ifdef _DD_TESTMODE_
+    inputFile = std::fopen("/etc/dataDiodeApp/peerMac1.conf", "r");
+    if (!inputFile) {
+        std::cerr << "Unable to open configuration file. Exiting..." << std::endl;
+        return -1;
+    }
+
+    pM[6];
+    ret = fscanf(inputFile, "%u:%u:%u:%u:%u:%u",
+           &pM[0], &pM[1], &pM[2], &pM[3], &pM[4], &pM[5]);
+    struct ether_addr peerMac1;
+    peerMac1.addr_bytes[0] = static_cast<uint8_t>(pM[0] & 0xFF);
+    peerMac1.addr_bytes[1] = static_cast<uint8_t>(pM[1] & 0xFF);
+    peerMac1.addr_bytes[2] = static_cast<uint8_t>(pM[2] & 0xFF);
+    peerMac1.addr_bytes[3] = static_cast<uint8_t>(pM[3] & 0xFF);
+    peerMac1.addr_bytes[4] = static_cast<uint8_t>(pM[4] & 0xFF);
+    peerMac1.addr_bytes[5] = static_cast<uint8_t>(pM[5] & 0xFF);
+    std::fclose(inputFile);
+#endif
 
     // populate config parameters
+#ifndef _DD_TESTMODE_
     app.configure(&peerMac, peerSId, sId);
+#else
+    app.configure(&peerMac, &peerMac1, peerSId, sId);
+#endif
 
     // initialize application
     app.initialize(argc, argv);

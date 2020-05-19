@@ -47,16 +47,26 @@ perCoreLoop(__attribute__((unused)) void* args)
 static uint32_t rxQueuePerLcore = 1;
 
 dataDiodeApp::dataDiodeApp() :
-        _nbMbufs(0), _pktMbufPool(NULL),
-        _userPortMask(0), _corePortId(0),
-        _corePortMode(PORTMODE_INVALID),
-        _corePort(NULL), _sId(0), _peerSId(0),
-        _accessPort(NULL), _timerPeriod(10000000)
+#ifndef _DD_TESTMODE_
+        _corePortId(0),_corePort(NULL),
+#endif
+        _nbMbufs(4096), _pktMbufPool(NULL),
+        _userPortMask(0), _corePortMode(PORTMODE_INVALID),
+        _timerPeriod(2), _accessPort(NULL),
+        _sId(0), _peerSId(0)
 {
-    bzero(&_peerCorePortEthAddr, sizeof(struct ether_addr));
+    bzero(&_peerCorePortEthAddr, sizeof(_peerCorePortEthAddr));
     bzero(_lcoreQueueConf, sizeof(lcoreQueueConf));
+#ifdef _DD_TESTMODE_
+        _corePortId[0] = 0;
+        _corePortId[1] = 0;
+        _corePort[0] = NULL;
+        _corePort[1] = NULL;
+
+#endif
 }
 
+#ifndef _DD_TESTMODE_
 void
 dataDiodeApp::configure(struct ether_addr* peerMac, uint16_t peerSId, uint16_t sId)
 {
@@ -64,6 +74,17 @@ dataDiodeApp::configure(struct ether_addr* peerMac, uint16_t peerSId, uint16_t s
     _sId = sId;
     bcopy(peerMac, &_peerCorePortEthAddr, sizeof(struct ether_addr));
 }
+#else
+void
+dataDiodeApp::configure(struct ether_addr* peerMac, struct ether_addr* peerMac1,
+                        uint16_t peerSId, uint16_t sId)
+{
+    _peerSId = peerSId;
+    _sId = sId;
+    bcopy(peerMac, &_peerCorePortEthAddr[0], sizeof(struct ether_addr));
+    bcopy(peerMac1, &_peerCorePortEthAddr[1], sizeof(struct ether_addr));
+}
+#endif
 
 void
 dataDiodeApp::initialize(int argc, char **argv)
@@ -189,6 +210,11 @@ dataDiodeApp::initialize(int argc, char **argv)
             break;
         }
     }
+
+    for(ddPortMap::iterator it = _pMap.begin(); it != _pMap.end(); ++it) {
+        rte_eth_dev_stop(it->second->portId());
+        rte_eth_dev_close(it->second->portId());
+    }
 }
 
 void
@@ -212,7 +238,7 @@ dataDiodeApp::mainLoop()
 
     const uint64_t drainTsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S *
                 BURST_TX_DRAIN_US;
-    volatile uint64_t prevTsc = 0, timerTsc = 0, curTsc = 0, diffTsc;
+    volatile uint64_t prevTsc = 0, timerTsc = 0, curTsc, diffTsc;
     while (!_forceQuit) {
         curTsc = rte_rdtsc();
 
@@ -228,7 +254,7 @@ dataDiodeApp::mainLoop()
         // Read packet from RX queues
         for (ddPortMap::iterator it = _pMap.begin();
              it != _pMap.end(); ++it) {
-            it->second->handleTx();
+            it->second->handleRx();
         }
         // do this only on master core and if timer is enabled
         if (lCoreId == rte_get_master_lcore() && _timerPeriod > 0) {
@@ -236,7 +262,7 @@ dataDiodeApp::mainLoop()
             timerTsc += diffTsc;
 
             // if timer has reached its timeout
-            if (unlikely(timerTsc >= _timerPeriod)) {
+            if (unlikely(timerTsc >= (_timerPeriod * rte_get_tsc_hz()))) {
                 printStats();
                 // reset the timer
                 timerTsc = 0;
@@ -244,7 +270,6 @@ dataDiodeApp::mainLoop()
         }
         prevTsc = curTsc;
     }
-    std::cout << "Exiting dataDiodeApp::mainLoop()" << std::endl;
 }
 
 void
@@ -253,20 +278,36 @@ dataDiodeApp::cleanup()
     // TODO: Future enhancements
 }
 
+void
+dataDiodeApp::usage(const char *prgName)
+{
+    std::cout << prgName << std::endl <<
+       "[EAL options] --\n"
+       "  -p PORTMASK: hexadecimal bitmask of ports to configure\n"
+       "  -R: start the program with core Port in RxOnly mode (MUTUALLY EXCLUSIVE with -T)\n"
+       "  -s MEMBUF_SIZE: Override membuf size (DEFAULT: 4096)\n"
+       "  -t PERIOD: statistics will be refreshed each PERIOD seconds (0 to disable, 2 default, 86400 maximum)\n"
+       "  -T: start the program with core Port in TxOnly mode (MUTUALLY EXCLUSIVE with -R)\n"
+#ifdef _DD_TESTMODE_
+       "  -x: start the program in test mode. NOT to be run in production network\n"
+#endif
+       << std::endl;
+}
+
 int
 dataDiodeApp::parseArgs(int argc, char **argv)
 {
-    int opt, ret, timer_secs;
-    char **argvopt;
-    int option_index;
-    char *prgname = argv[0];
+    int opt, ret;
+    char **argvOpt;
+    int optionIndex;
+    char *prgName = argv[0];
     const char shortOptions[] =
+        "h"  // portmask
         "p:"  // portmask
-        "q:"  // number of queues
         "R"  // receive only mode
         "s:"  // membuf size
         "T"  // transmit only mode
-        "t:"  // timer period
+        "t:"  // timer period for port statistics refresh in seconds
 #ifdef _DD_TESTMODE_
         "x"  // Test mode
 #endif
@@ -275,18 +316,22 @@ dataDiodeApp::parseArgs(int argc, char **argv)
         {NULL, 0, 0, 0}
     };
 
-    argvopt = argv;
+    argvOpt = argv;
 
 #ifdef _DD_TESTMODE_
-    corePortId[0] = 1;
-    corePortId[1] = 2;
-    corePortMode = PORTMODE_BIDIR;
+    _corePortId[0] = 0;
+    _corePortId[1] = 1;
+    _corePortMode = PORTMODE_BIDIR;
 #endif
 
-    while ((opt = getopt_long(argc, argvopt, shortOptions,
-                  longOptions, &option_index)) != EOF) {
+    while ((opt = getopt_long(argc, argvOpt, shortOptions,
+                  longOptions, &optionIndex)) != EOF) {
 
         switch (opt) {
+        case 'h':
+            usage(prgName);
+            rte_exit(EXIT_SUCCESS, "Exiting...\n");
+            break;
         // portmask
         case 'p':
         {
@@ -312,6 +357,13 @@ dataDiodeApp::parseArgs(int argc, char **argv)
             _corePortMode = PORTMODE_RX;
             _corePortId = 1;
             break;
+        case 't':
+        {
+            char *end = NULL;
+            _timerPeriod = strtoul(optarg, &end, 10);
+            _timerPeriod = (_timerPeriod > 86400) ? 86400 : _timerPeriod;
+            break;
+        }
         case 'T':
             std::cout << "Setting role as Tx Only" << std::endl;
             _corePortMode = PORTMODE_TX;
@@ -319,10 +371,10 @@ dataDiodeApp::parseArgs(int argc, char **argv)
             break;
 #else
         case 'x':
-            std::cout << "Setting role as Tx Only" << std::endl;
-            corePortId[0] = 1;
-            corePortId[1] = 2;
-            corePortMode = PORTMODE_BIDIR;
+            std::cout << "Setting Test mode" << std::endl;
+            _corePortId[0] = 0;
+            _corePortId[1] = 1;
+            _corePortMode = PORTMODE_BIDIR;
             break;
 #endif // _DD_TESTMODE_
         default:
@@ -333,11 +385,19 @@ dataDiodeApp::parseArgs(int argc, char **argv)
     return EXIT_SUCCESS;
 }
 
+#ifndef _DD_TESTMODE_
 const struct ether_addr*
 dataDiodeApp::corePortEthAddr() const
 {
     return _corePort->ethAddr();
 }
+#else
+const struct ether_addr*
+dataDiodeApp::corePortEthAddr(uint16_t portId) const
+{
+    return _corePort[portId]->ethAddr();
+}
+#endif
 
 void
 dataDiodeApp::printStats()
@@ -368,7 +428,7 @@ dataDiodeApp::printStats()
               << std::endl;
     for (ddPortMap::iterator it = _pMap.begin(); it != _pMap.end(); ++it) {
         std::cout << " Port "
-                  << it->second->portId()
+                  << it->second->portId() << std::setw(colWidth)
                   << std::setw(colWidth) << it->second->rxStats()
                   << std::setw(colWidth) << it->second->txStats()
                   << std::setw(colWidth) << it->second->rxDropStats()

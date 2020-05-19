@@ -80,7 +80,6 @@ private:
         _forceQuit = true;
     }
 
-
     static dataDiodeApp *_appPtr;
     volatile static bool _forceQuit;
 
@@ -88,9 +87,11 @@ private:
 #ifndef _DD_TESTMODE_
     ddPort *_corePort;
     int _corePortId;
+    struct ether_addr _peerCorePortEthAddr;
 #else
     ddPort *_corePort[2];
-    int corePortId[2];
+    int _corePortId[2];
+    struct ether_addr _peerCorePortEthAddr[2];
 #endif
 
     ddPort *_accessPort;
@@ -101,7 +102,6 @@ private:
     struct lcoreQueueConf _lcoreQueueConf[RTE_MAX_LCORE];
     uint16_t _sId;
     uint16_t _peerSId;
-    struct ether_addr _peerCorePortEthAddr;
     uint64_t _timerPeriod;
 
 protected:
@@ -117,8 +117,13 @@ public:
     // member function to cleanup the application before exiting
     void cleanup();
 
+#ifndef _DD_TESTMODE_
     // member function to configure parameters
     void configure(struct ether_addr* peerMac, uint16_t peerSId, uint16_t sId);
+#else
+    // member function to configure parameters
+    void configure(struct ether_addr* peerMac, struct ether_addr* peerMac1, uint16_t peerSId, uint16_t sId);
+#endif
 
     static dataDiodeApp& instance()
     {
@@ -131,17 +136,28 @@ public:
     // Print out statistics on packets dropped
     void printStats();
 
+    // Display usage
+    void usage(const char *prgName);
+
     // accessors
     bool forceQuit() { return _forceQuit; }
     struct rte_mempool* pktMbufPool() { return _pktMbufPool; }
+#ifndef _DD_TESTMODE_
     ddPort* corePort() const { return _corePort; }
-    ddPort* accessPort() const { return _accessPort; }
-    const uint16_t corePortId() const { return _corePortId; }
-    const PortMode corePortMode() const { return _corePortMode; }
     const struct ether_addr* corePortEthAddr() const;
+    const struct ether_addr* peerCorePortEthAddr() { return &_peerCorePortEthAddr; }
+#else
+    ddPort* corePort(PortMode mode = PORTMODE_TX) const { return mode == PORTMODE_RX? _corePort[0] : _corePort[1]; }
+    const struct ether_addr* corePortEthAddr(uint16_t portId) const;
+    const struct ether_addr* peerCorePortEthAddr(uint16_t idx) { return &_peerCorePortEthAddr[idx]; }
+#endif
+    ddPort* accessPort() const { return _accessPort; }
+#ifndef _DD_TESTMODE_
+    const uint16_t corePortId() const { return _corePortId; }
+#endif
+    const PortMode corePortMode() const { return _corePortMode; }
     const uint16_t sId() const { return _sId; }
     const uint16_t peerSId() const { return _peerSId; }
-    const struct ether_addr* peerCorePortEthAddr() { return &_peerCorePortEthAddr; }
 };
 
 

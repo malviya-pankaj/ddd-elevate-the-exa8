@@ -144,7 +144,7 @@ ddPort::initialize()
         rte_exit(EXIT_FAILURE, "Port tx queue setup failed :err=%d, port=%u\n",
             ret, _portId);
 
-    // Initialize TX buffers
+    /* Initialize TX buffers */
     _txBuffer = (rte_eth_dev_tx_buffer*)rte_zmalloc_socket("tx_buffer",
                                    RTE_ETH_TX_BUFFER_SIZE(MAX_PKT_BURST),
                                    0, rte_eth_dev_socket_id(_portId));
@@ -182,12 +182,17 @@ ddRxOnlyCorePort::handleRx()
 
     incRxStats(nRx);
 
+#ifndef _DD_TESTMODE_
     const struct ether_addr *destAddr= dataDiodeApp::instance().corePortEthAddr();
+#else
+    const struct ether_addr *destAddr= dataDiodeApp::instance().corePortEthAddr(0);
+#endif
     if (NULL == destAddr) {
         rte_exit(EXIT_FAILURE,
                  "Unable to fetch MAC address of peer core Port. Exiting...\n");
     }
     for (uint32_t j = 0; j < nRx; j++) {
+        bool errDetect = false;
         struct rte_mbuf * pkt = pktsBurst[j];
         rte_prefetch0(rte_pktmbuf_mtod(pkt, void *));
         struct tunnelHdr_ *tunnelHdr = rte_pktmbuf_mtod(pkt, struct tunnelHdr_ *);
@@ -195,24 +200,37 @@ ddRxOnlyCorePort::handleRx()
         // Verify the encapsulation of the received packet
         uint32_t ret = memcmp(destAddr, &(tunnelHdr->dAddr), sizeof(struct ether_addr));
         if (0 == ret) {
+            errDetect = true;
             std::cerr << "Received packet with incorrect DST MAC." << std::endl;
         }
+
+#ifndef _DD_TESTMODE_
         const struct ether_addr* peerCorePortEthAddr = dataDiodeApp::instance().peerCorePortEthAddr();
+#else
+        const struct ether_addr* peerCorePortEthAddr = dataDiodeApp::instance().peerCorePortEthAddr(0);
+#endif
         ret = memcmp(peerCorePortEthAddr, &(tunnelHdr->sAddr), sizeof(struct ether_addr));
-        if (0 == ret) {
+        if (errDetect || 0 == ret) {
+            errDetect = true;
             std::cerr << "Received packet with incorrect SRC MAC." << std::endl;
         }
-        if (tunnelHdr->etherType != rte_cpu_to_be_16(DATADIODE_TUNNEL_ETHTYPE) ||
-            tunnelHdr->sId != rte_cpu_to_be_16(dataDiodeApp::instance().peerSId())) {
+        if (errDetect || (tunnelHdr->etherType != rte_cpu_to_be_16(DATADIODE_TUNNEL_ETHTYPE) ||
+            tunnelHdr->sId != rte_cpu_to_be_16(dataDiodeApp::instance().peerSId()))) {
+            errDetect = true;
             std::cerr << "Incorrect EtherType or Sid detected." << std::endl;
         }
-        // De-capsulate packet and transmit it on access port
-        struct ether_hdr* ethHdr = reinterpret_cast<struct ether_hdr*>(rte_pktmbuf_adj(pkt, sizeof(struct ether_hdr)));
-        // TODO: Add validations to validate inner frame
-        struct rte_eth_dev_tx_buffer* txBuf = dataDiodeApp::instance().accessPort()->txBuffer();
-        uint16_t sent = rte_eth_tx_buffer(dataDiodeApp::instance().accessPort()->portId(),
-                                          0, txBuf, pkt);
-        dataDiodeApp::instance().accessPort()->incTxStats(sent);
+        if (errDetect) {
+            //rte_pktmbuf_free(pkt);
+            incRxDropStats(1);
+        } else {
+            // De-capsulate packet and transmit it on access port
+            struct ether_hdr* ethHdr = reinterpret_cast<struct ether_hdr*>(rte_pktmbuf_adj(pkt, sizeof(struct ether_hdr)));
+            // TODO: Add validations to validate inner frame
+            struct rte_eth_dev_tx_buffer* txBuf = dataDiodeApp::instance().accessPort()->txBuffer();
+            uint16_t sent = rte_eth_tx_buffer(dataDiodeApp::instance().accessPort()->portId(),
+                                              0, txBuf, pkt);
+            dataDiodeApp::instance().accessPort()->incTxStats(sent);
+        }
     }
 }
 
@@ -255,8 +273,13 @@ ddAccessPort::handleRx()
 
     incRxStats(nRx);
 
+#ifndef _DD_TESTMODE_
     const struct ether_addr *dstAddr= dataDiodeApp::instance().peerCorePortEthAddr();
     const struct ether_addr *srcAddr= dataDiodeApp::instance().corePortEthAddr();
+#else
+    const struct ether_addr *dstAddr= dataDiodeApp::instance().peerCorePortEthAddr(0);
+    const struct ether_addr *srcAddr= dataDiodeApp::instance().corePortEthAddr(1);
+#endif
     if (NULL == dstAddr) {
         rte_exit(EXIT_FAILURE,
                  "Unable to fetch MAC address of peer core Port. Exiting...\n");
@@ -272,7 +295,12 @@ ddAccessPort::handleRx()
         // SMAC: Source MAC address
         // ETYPE : Ethertype set to 0x4004 (Unregistered with IANA)
         // SID: Secure ID of the Tx-only device
+#ifndef _DD_TESTMODE_
         if (dataDiodeApp::PORTMODE_TX == dataDiodeApp::instance().corePortMode()) {
+#else
+        if (dataDiodeApp::PORTMODE_BIDIR == dataDiodeApp::instance().corePortMode() &&
+            portId() == 4) {
+#endif
             struct tunnelHdr_ *tunnelHdr = reinterpret_cast<struct tunnelHdr_*>(
                         rte_pktmbuf_prepend(pkt, sizeof(struct tunnelHdr_)));
             if (NULL == tunnelHdr) {
@@ -285,11 +313,23 @@ ddAccessPort::handleRx()
             tunnelHdr->sId = rte_be_to_cpu_16(dataDiodeApp::instance().sId());
 
             // put the packet into the tx buffer of core port
+#ifndef _DD_TESTMODE_
             struct rte_eth_dev_tx_buffer* txBuf = dataDiodeApp::instance().corePort()->txBuffer();
             uint16_t sent = rte_eth_tx_buffer(dataDiodeApp::instance().corePortId(),
                                               0, txBuf, pkt);
             dataDiodeApp::instance().corePort()->incTxStats(sent);
+#else
+            struct rte_eth_dev_tx_buffer* txBuf = dataDiodeApp::instance().corePort(dataDiodeApp::PORTMODE_TX)->txBuffer();
+            uint16_t sent = rte_eth_tx_buffer(1, 0, txBuf, pkt);
+            dataDiodeApp::instance().corePort(dataDiodeApp::PORTMODE_TX)->incTxStats(sent);
+#endif
+
+#ifndef _DD_TESTMODE_
         } else if (dataDiodeApp::PORTMODE_RX == dataDiodeApp::instance().corePortMode()) {
+#else
+        } else if (dataDiodeApp::PORTMODE_BIDIR == dataDiodeApp::instance().corePortMode() &&
+                portId() == 3) {
+#endif
             // if corePort is configured for Rx-Only role, drop the packet
             rte_pktmbuf_free(pkt);
             incRxDropStats(1);
