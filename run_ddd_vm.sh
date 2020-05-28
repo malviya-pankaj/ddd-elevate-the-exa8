@@ -38,5 +38,5 @@ ip link set enp0s9 down
 dpdk-devbind.py --bind igb_uio 0000:00:08.0
 dpdk-devbind.py --bind igb_uio 0000:00:09.0
 
-/home/pankaj/projects/try/ddd/build/app/datadiode -l 0-1 -n 4 -- -s 4096 -p 0x7 -T
+./datadiode -l 0-1 -n 4 -- -s 4096 -p 0x7 $1
 

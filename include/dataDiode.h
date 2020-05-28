@@ -39,7 +39,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>
 #define PKT_BURST_SZ            32
 
 // How many objects (mbufs) to keep in per-lcore mempool cache
-#define MEMPOOL_CACHE_SZ        PKT_BURST_SZ
+#define MEMPOOL_CACHE_SZ        256
 
 #define MAX_PKT_BURST           32
 #define BURST_TX_DRAIN_US       100 // TX drain every ~100us

@@ -44,8 +44,6 @@ perCoreLoop(__attribute__((unused)) void* args)
     return 0;
 }
 
-static uint32_t rxQueuePerLcore = 1;
-
 dataDiodeApp::dataDiodeApp() :
 #ifndef _DD_TESTMODE_
         _corePortId(0),_corePort(NULL),
@@ -53,7 +51,8 @@ dataDiodeApp::dataDiodeApp() :
         _nbMbufs(4096), _pktMbufPool(NULL),
         _userPortMask(0), _corePortMode(PORTMODE_INVALID),
         _timerPeriod(2), _accessPort(NULL),
-        _sId(0), _peerSId(0)
+        _sId(0), _peerSId(0),showEthStats(false),
+        _rxQueuePerLcore(1)
 {
     bzero(&_peerCorePortEthAddr, sizeof(_peerCorePortEthAddr));
     bzero(_lcoreQueueConf, sizeof(lcoreQueueConf));
@@ -109,6 +108,42 @@ dataDiodeApp::initialize(int argc, char **argv)
                  "Incorrect arguments.\nExiting...\n");
     }
 
+    // enumerate ports
+    int nPorts = rte_eth_dev_count_avail();
+    if (nPorts == 0) {
+            rte_exit(EXIT_FAILURE, "No Ethernet ports.\nExiting...\n");
+    }
+
+    uint16_t portId;
+    unsigned int rxLcoreId = 0;
+    lcoreQueueConf *qConf = NULL;
+
+    // Initialize the port/queue configuration of each logical core
+    RTE_ETH_FOREACH_DEV(portId) {
+        // skip the ports that are not enabled
+        if ((_userPortMask & (1 << portId)) == 0)
+            continue;
+
+        // get the lcore_id for this port
+        while (0 == rte_lcore_is_enabled(rxLcoreId) ||
+                _lcoreQueueConf[rxLcoreId].nRxPort == _rxQueuePerLcore) {
+            rxLcoreId++;
+            if (rxLcoreId >= RTE_MAX_LCORE)
+                rte_exit(EXIT_FAILURE, "Not enough cores\n");
+        }
+
+        if (qConf != &_lcoreQueueConf[rxLcoreId]) {
+            // Assigned a new logical core in the loop above
+            qConf = &_lcoreQueueConf[rxLcoreId];
+        }
+
+        qConf->rxPortList[qConf->nRxPort] = portId;
+        qConf->nRxPort++;
+        std::cout << "Lcore " << rxLcoreId << ": RX port " << portId
+                  << ": nRxPort " << qConf->nRxPort << std::endl;
+    }
+
+
     // create mbuf pool
     _pktMbufPool = rte_pktmbuf_pool_create("mbuf_pool", _nbMbufs,
                                            MEMPOOL_CACHE_SZ,
@@ -120,13 +155,6 @@ dataDiodeApp::initialize(int argc, char **argv)
         return;
     }
 
-    // enumerate ports
-    int nPorts = rte_eth_dev_count_avail();
-    if (nPorts == 0) {
-            rte_exit(EXIT_FAILURE, "No Ethernet ports.\nExiting...\n");
-    }
-
-    uint16_t portId;
     struct rte_eth_dev_info devInfo;
     RTE_ETH_FOREACH_DEV(portId) {
         // skip ports that are not enabled
@@ -175,33 +203,12 @@ dataDiodeApp::initialize(int argc, char **argv)
         std::cout << "Port Id: " << portId << " PortName: "
                   << pPort->devName() << std::endl;
 
-        // get the lcore_id for this port
-        unsigned int rxLcoreId = 0;
-        while (rte_lcore_is_enabled(rxLcoreId) == 0 ||
-               _lcoreQueueConf[rxLcoreId].nRxPort ==
-               rxQueuePerLcore) {
-            rxLcoreId++;
-            if (rxLcoreId >= RTE_MAX_LCORE)
-                rte_exit(EXIT_FAILURE, "Not enough cores\n");
-        }
-
-        dataDiodeApp::lcoreQueueConf *qConf = NULL;
-        if (qConf != &_lcoreQueueConf[rxLcoreId]) {
-            // Assigned a new logical core in the loop above
-            qConf = &_lcoreQueueConf[rxLcoreId];
-        }
-
-        qConf->rxPortList[qConf->nRxPort] = portId;
-        qConf->nRxPort++;
-        std::cout << "Lcore " << rxLcoreId << ": RX port " << portId
-                  << " nRxPort " << qConf->nRxPort << std::endl;
-
         pPort->initialize();
         pPort->checkLinkStatus();
     }
 
     ret = 0;
-    uint32_t lcoreId, rx_lcore_id;
+    uint32_t lcoreId;
     // launch per-lcore initialization on every lcore
     rte_eal_mp_remote_launch(perCoreLoop, NULL, CALL_MASTER);
     RTE_LCORE_FOREACH_SLAVE(lcoreId) {
@@ -248,13 +255,15 @@ dataDiodeApp::mainLoop()
 
             for (ddPortMap::iterator it = _pMap.begin();
                  it != _pMap.end(); ++it) {
-                it->second->handleTx();
+                if (lCoreId == it->second->portId())
+                    it->second->handleTx();
             }
         }
         // Read packet from RX queues
         for (ddPortMap::iterator it = _pMap.begin();
              it != _pMap.end(); ++it) {
-            it->second->handleRx();
+            if (lCoreId == it->second->portId())
+                it->second->handleRx();
         }
         // do this only on master core and if timer is enabled
         if (lCoreId == rte_get_master_lcore() && _timerPeriod > 0) {
@@ -302,7 +311,8 @@ dataDiodeApp::parseArgs(int argc, char **argv)
     int optionIndex;
     char *prgName = argv[0];
     const char shortOptions[] =
-        "h"  // portmask
+        "e"  // ethernet Stats
+        "h"  // help text
         "p:"  // portmask
         "R"  // receive only mode
         "s:"  // membuf size
@@ -328,6 +338,9 @@ dataDiodeApp::parseArgs(int argc, char **argv)
                   longOptions, &optionIndex)) != EOF) {
 
         switch (opt) {
+        case 'e':
+            showEthStats = true;
+            break;
         case 'h':
             usage(prgName);
             rte_exit(EXIT_SUCCESS, "Exiting...\n");
@@ -429,15 +442,80 @@ dataDiodeApp::printStats()
     for (ddPortMap::iterator it = _pMap.begin(); it != _pMap.end(); ++it) {
         std::cout << " Port "
                   << it->second->portId() << std::setw(colWidth)
-                  << std::setw(colWidth) << it->second->rxStats()
-                  << std::setw(colWidth) << it->second->txStats()
-                  << std::setw(colWidth) << it->second->rxDropStats()
-                  << std::setw(colWidth) << it->second->txDropStats()
+                  << std::setw(5 + colWidth) << it->second->rxStats()
+                  << std::setw(3 + colWidth) << it->second->txStats()
+                  << std::setw(3 + colWidth) << it->second->rxDropStats()
+                  << std::setw(1 + colWidth) << it->second->txDropStats()
+		  << std::endl;
+        }
+    std::cout << std::endl
+              <<"================================================================================="
+              << std::endl;
+
+    std::cout << "====================== Data Diode IN4004 Error Statistics ======================="
+              << std::endl
+              << "Interface" << " | "
+              << std::setw(colWidth) << "Bad Src Addr" << " | "
+              << std::setw(colWidth) << "Bad Dst Addr" << " | "
+              << std::setw(colWidth) << "Bad Eth Type" << " | "
+              << std::setw(colWidth) << "Bad SId |"
+              << std::endl
+              << "---------------------------------------------------------------------------------"
+              << std::endl;
+
+    for (ddPortMap::iterator it = _pMap.begin(); it != _pMap.end(); ++it) {
+        std::cout << " Port "
+                  << it->second->portId() << std::setw(colWidth)
+                  << std::setw(5 + colWidth) << it->second->errStatsBadSrcAddr()
+                  << std::setw(3 + colWidth) << it->second->errStatsBadDstAddr()
+                  << std::setw(3 + colWidth) << it->second->errStatsBadEthType()
+                  << std::setw(1 + colWidth) << it->second->errStatsBadSIdr()
                   << std::endl;
     }
     std::cout << std::endl
               <<"================================================================================="
               << std::endl;
+    if (showEthStats) printEthStats();
 }
 
+void
+dataDiodeApp::printEthStats()
+{
+    uint16_t colWidth = 10;
+    struct rte_eth_stats ethStats;
 
+    std::cout << "===================== Data Diode IN4004 Traffic Statistics ======================"
+              << std::endl
+              << "Interface" << " | "
+              << std::setw(colWidth) << "ipackets" << " | "
+              << std::setw(colWidth) << "opackets" << " | "
+              << std::setw(colWidth) << "imissed" << " | "
+              << std::setw(colWidth) << "ierrors | "
+              << std::setw(colWidth) << "oerrors" << " | "
+              << std::setw(colWidth) << "rx_nombuf" << " | "
+              << std::setw(colWidth) << "q_ipackets" << " | "
+              << std::setw(colWidth) << "q_opackets" << " | "
+              << std::setw(colWidth) << "q_errors" << " |"
+              << std::endl
+              << "---------------------------------------------------------------------------------"
+              << std::endl;
+    for (ddPortMap::iterator it = _pMap.begin(); it != _pMap.end(); ++it) {
+        rte_eth_stats_get(it->second->portId(), &ethStats);
+        std::cout << " Port "
+                  << it->second->portId() << std::setw(colWidth)
+                  << std::setw(5 + colWidth) << ethStats.ipackets
+                  << std::setw(3 + colWidth) << ethStats.opackets
+                  << std::setw(3 + colWidth) << ethStats.imissed
+                  << std::setw(3 + colWidth) << ethStats.ierrors
+                  << std::setw(3 + colWidth) << ethStats.oerrors
+                  << std::setw(3 + colWidth) << ethStats.rx_nombuf
+                  << std::setw(3 + colWidth) << ethStats.q_ipackets[0]
+                  << std::setw(3 + colWidth) << ethStats.q_opackets[0]
+                  << std::setw(3 + colWidth) << ethStats.q_errors[0]
+          << std::endl;
+        }
+    std::cout << std::endl
+              <<"================================================================================="
+              << std::endl;
+
+}

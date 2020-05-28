@@ -49,6 +49,13 @@ private:
         uint64_t  rxDropped;
     } __rte_cache_aligned;
     struct stats_ _stats;
+    struct errStats_ {
+        uint64_t  badDstAddr;
+        uint64_t  badSrcAddr;
+        uint64_t  badEthType;
+        uint64_t  badSId;
+    } __rte_cache_aligned;
+    struct errStats_ _errStats;
 
 public:
     struct tunnelHdr_ {
@@ -73,10 +80,19 @@ public:
     uint64_t txStats() const { return _stats.tx; }
     uint64_t rxDropStats() const { return _stats.rxDropped; }
     uint64_t txDropStats() const { return _stats.txDropped; }
+    uint64_t errStatsBadSrcAddr() const { return _errStats.badSrcAddr; }
+    uint64_t errStatsBadDstAddr() const { return _errStats.badDstAddr; }
+    uint64_t errStatsBadEthType() const { return _errStats.badEthType; }
+    uint64_t errStatsBadSIdr() const { return _errStats.badSId; }
     void incRxStats(uint64_t pkts) { _stats.rx += pkts; }
     void incTxStats(uint64_t pkts) { _stats.tx += pkts; }
     void incRxDropStats(uint64_t pkts) { _stats.rxDropped += pkts; }
     void incTxDropStats(uint64_t pkts) { _stats.txDropped += pkts; }
+    void incErrStatsBadSrcAddr() {  _errStats.badSrcAddr++; }
+    void incErrStatsBadDstAddr() {  _errStats.badDstAddr++; }
+    void incErrStatsBadEthType() {  _errStats.badEthType++; }
+    void incErrStatsBadSId() {  _errStats.badSId++; }
+
     virtual void handleRx() = 0;
     virtual void handleTx() = 0;
 };

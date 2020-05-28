@@ -45,7 +45,7 @@ main (int argc, char **argv)
     }
     uint32_t id, ret;
     ret = fscanf(inputFile, "%u", &id);
-    uint16_t sId = static_cast<uint16_t>(id & 0xFF);
+    uint16_t sId = static_cast<uint16_t>(id & 0xFFFF);
     std::fclose(inputFile);
 
     inputFile = std::fopen("/etc/dataDiodeApp/peerSid.conf", "r");
@@ -54,7 +54,7 @@ main (int argc, char **argv)
         return -1;
     }
     ret = fscanf(inputFile, "%u", &id);
-    uint16_t peerSId = static_cast<uint16_t>(id & 0xFF);
+    uint16_t peerSId = static_cast<uint16_t>(id & 0xFFFF);
     std::fclose(inputFile);
 
     inputFile = std::fopen("/etc/dataDiodeApp/peerMac.conf", "r");
@@ -64,7 +64,7 @@ main (int argc, char **argv)
     }
 
     uint32_t pM[6];
-    ret = fscanf(inputFile, "%u:%u:%u:%u:%u:%u",
+    ret = fscanf(inputFile, "%02x:%02x:%02x:%02x:%02x:%02x",
            &pM[0], &pM[1], &pM[2], &pM[3], &pM[4], &pM[5]);
     struct ether_addr peerMac;
     peerMac.addr_bytes[0] = static_cast<uint8_t>(pM[0] & 0xFF);
@@ -83,7 +83,7 @@ main (int argc, char **argv)
     }
 
     pM[6];
-    ret = fscanf(inputFile, "%u:%u:%u:%u:%u:%u",
+    ret = fscanf(inputFile, "%02x:%02x:%02x:%02x:%02x:%02x",
            &pM[0], &pM[1], &pM[2], &pM[3], &pM[4], &pM[5]);
     struct ether_addr peerMac1;
     peerMac1.addr_bytes[0] = static_cast<uint8_t>(pM[0] & 0xFF);

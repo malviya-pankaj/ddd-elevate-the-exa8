@@ -90,9 +90,10 @@ ddPort::ddPort(uint16_t portId) :
     bzero(&_devInfo, sizeof(struct rte_eth_dev_info));
     bzero(&_rxqConf, sizeof(struct rte_eth_rxconf));
     bzero(&_txqConf, sizeof(struct rte_eth_txconf));
-    bzero(&_localPortConf, sizeof(struct rte_eth_conf));
     bzero(&_ethAddr, sizeof(struct ether_addr));
     bzero(&_stats, sizeof(struct stats_));
+    bzero(&_errStats, sizeof(struct errStats_));
+    _localPortConf = portConf;
 
     // get device info while creating ddPort object
     rte_eth_dev_info_get(portId, &_devInfo);
@@ -104,42 +105,42 @@ ddPort::initialize()
     std::cout << "Initializing port " << _portId
                       << " ..." << std::endl;
 
-    if (_devInfo.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
-        portConf.txmode.offloads |=
-            DEV_TX_OFFLOAD_MBUF_FAST_FREE;
-    int ret = rte_eth_dev_configure(_portId, 1, 1, &portConf);
+    if (_devInfo.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE) {
+        _localPortConf.txmode.offloads |= DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+    }
+    int ret = rte_eth_dev_configure(_portId, 1, 1, &_localPortConf);
     if (ret < 0)
         rte_exit(EXIT_FAILURE,
-                 "Cannot configure device: err=%d, port=%u\n",
+                 "Cannot configure device: err = %d, port = %u\n",
                  ret, _portId);
 
     ret = rte_eth_dev_adjust_nb_rx_tx_desc(_portId, &nb_rxd, &nb_txd);
     if (ret < 0)
         rte_exit(EXIT_FAILURE,
-                 "Cannot adjust number of descriptors: err=%d, port=%u\n",
+                 "Cannot adjust number of descriptors: err = %d, port = %u\n",
                  ret, _portId);
 
     rte_eth_macaddr_get(_portId, &_ethAddr);
 
     // init one RX queue
-    struct rte_eth_rxconf rxqConf = _devInfo.default_rxconf;
+    _rxqConf = _devInfo.default_rxconf;
 
-    rxqConf.offloads = portConf.rxmode.offloads;
+    _rxqConf.offloads = portConf.rxmode.offloads;
     ret = rte_eth_rx_queue_setup(_portId, 0, nb_rxd,
                                  rte_eth_dev_socket_id(_portId),
-                                 &rxqConf,
+                                 &_rxqConf,
                                  dataDiodeApp::instance().pktMbufPool());
     if (ret < 0)
         rte_exit(EXIT_FAILURE, "Port rx queue setup failed :err=%d, port=%u\n",
                  ret, _portId);
 
     // init one TX queue on each port
-    struct rte_eth_txconf txqConf = _devInfo.default_txconf;
-    txqConf.txq_flags = ETH_TXQ_FLAGS_IGNORE;
-    txqConf.offloads = portConf.txmode.offloads;
+    _txqConf = _devInfo.default_txconf;
+    _txqConf.txq_flags = ETH_TXQ_FLAGS_IGNORE;
+    _txqConf.offloads = portConf.txmode.offloads;
     ret = rte_eth_tx_queue_setup(_portId, 0, nb_txd,
                                  rte_eth_dev_socket_id(_portId),
-                                 &txqConf);
+                                 &_txqConf);
     if (ret < 0)
         rte_exit(EXIT_FAILURE, "Port tx queue setup failed :err=%d, port=%u\n",
             ret, _portId);
@@ -162,6 +163,7 @@ ddPort::initialize()
                  "Cannot set error callback for tx buffer on port %u\n",
                  _portId);
     start();
+    rte_eth_promiscuous_enable(_portId);
 }
 
 void
@@ -183,11 +185,11 @@ ddRxOnlyCorePort::handleRx()
     incRxStats(nRx);
 
 #ifndef _DD_TESTMODE_
-    const struct ether_addr *destAddr= dataDiodeApp::instance().corePortEthAddr();
+    const struct ether_addr *dstAddr= dataDiodeApp::instance().corePortEthAddr();
 #else
-    const struct ether_addr *destAddr= dataDiodeApp::instance().corePortEthAddr(0);
+    const struct ether_addr *dstAddr= dataDiodeApp::instance().corePortEthAddr(0);
 #endif
-    if (NULL == destAddr) {
+    if (NULL == dstAddr) {
         rte_exit(EXIT_FAILURE,
                  "Unable to fetch MAC address of peer core Port. Exiting...\n");
     }
@@ -198,10 +200,10 @@ ddRxOnlyCorePort::handleRx()
         struct tunnelHdr_ *tunnelHdr = rte_pktmbuf_mtod(pkt, struct tunnelHdr_ *);
 
         // Verify the encapsulation of the received packet
-        uint32_t ret = memcmp(destAddr, &(tunnelHdr->dAddr), sizeof(struct ether_addr));
-        if (0 == ret) {
+        uint32_t ret = memcmp(dstAddr, &(tunnelHdr->dAddr), sizeof(struct ether_addr));
+        if (0 != ret) {
             errDetect = true;
-            std::cerr << "Received packet with incorrect DST MAC." << std::endl;
+            incErrStatsBadDstAddr();
         }
 
 #ifndef _DD_TESTMODE_
@@ -210,21 +212,26 @@ ddRxOnlyCorePort::handleRx()
         const struct ether_addr* peerCorePortEthAddr = dataDiodeApp::instance().peerCorePortEthAddr(0);
 #endif
         ret = memcmp(peerCorePortEthAddr, &(tunnelHdr->sAddr), sizeof(struct ether_addr));
-        if (errDetect || 0 == ret) {
+        if (errDetect == false && 0 != ret) {
             errDetect = true;
-            std::cerr << "Received packet with incorrect SRC MAC." << std::endl;
+            incErrStatsBadDstAddr();
         }
-        if (errDetect || (tunnelHdr->etherType != rte_cpu_to_be_16(DATADIODE_TUNNEL_ETHTYPE) ||
-            tunnelHdr->sId != rte_cpu_to_be_16(dataDiodeApp::instance().peerSId()))) {
+
+        if (errDetect == false && (tunnelHdr->etherType != rte_cpu_to_be_16(DATADIODE_TUNNEL_ETHTYPE))) {
             errDetect = true;
-            std::cerr << "Incorrect EtherType or Sid detected." << std::endl;
+            incErrStatsBadEthType();
         }
+
+        if (errDetect == false && tunnelHdr->sId != rte_cpu_to_be_16(dataDiodeApp::instance().peerSId())) {
+            errDetect = true;
+            incErrStatsBadSId();
+        }
+
         if (errDetect) {
-            //rte_pktmbuf_free(pkt);
-            incRxDropStats(1);
+            rte_pktmbuf_free(pkt);
         } else {
             // De-capsulate packet and transmit it on access port
-            struct ether_hdr* ethHdr = reinterpret_cast<struct ether_hdr*>(rte_pktmbuf_adj(pkt, sizeof(struct ether_hdr)));
+            struct ether_hdr* ethHdr = reinterpret_cast<struct ether_hdr*>(rte_pktmbuf_adj(pkt, sizeof(struct tunnelHdr_)));
             // TODO: Add validations to validate inner frame
             struct rte_eth_dev_tx_buffer* txBuf = dataDiodeApp::instance().accessPort()->txBuffer();
             uint16_t sent = rte_eth_tx_buffer(dataDiodeApp::instance().accessPort()->portId(),
@@ -240,7 +247,6 @@ ddRxOnlyCorePort::handleTx()
     // If a packet reaches for Tx on Rx-Only coreport, it may be suspicious
     // Report it and drop the packet
     if (txBuffer()->length) {
-        std::cerr << "WARNING: Packet for Tx on Rx-Only Core port. Dropping the packet" << std::endl;
         rte_eth_tx_buffer_count_callback(txBuffer()->pkts, txBuffer()->length, &(stats()->txDropped));
     }
 }
@@ -248,10 +254,18 @@ ddRxOnlyCorePort::handleTx()
 void
 ddTxOnlyCorePort::handleRx()
 {
-    // Shouldn't receive anything on this port, drop it if anything is received
-    if (txBuffer()->length) {
-        std::cerr << "WARNING: Packet Rx on Tx-Only Core port. Dropping the packet" << std::endl;
-        rte_eth_tx_buffer_count_callback(txBuffer()->pkts, txBuffer()->length, &(stats()->rxDropped));
+    struct rte_mbuf *pktsBurst[MAX_PKT_BURST];
+    uint32_t nRx = rte_eth_rx_burst(portId(), 0,
+                                    pktsBurst, MAX_PKT_BURST);
+
+    incRxStats(nRx);
+    // Shouldn't process anything on this port, drop it if anything is received
+    for (uint32_t j = 0; j < nRx; j++) {
+        bool errDetect = false;
+        struct rte_mbuf * pkt = pktsBurst[j];
+        rte_prefetch0(rte_pktmbuf_mtod(pkt, void *));
+        rte_pktmbuf_free(pkt);
+        incRxDropStats(1);
     }
 }
 
@@ -304,8 +318,9 @@ ddAccessPort::handleRx()
             struct tunnelHdr_ *tunnelHdr = reinterpret_cast<struct tunnelHdr_*>(
                         rte_pktmbuf_prepend(pkt, sizeof(struct tunnelHdr_)));
             if (NULL == tunnelHdr) {
-                std::cerr << "Not enough memory to send packet" << std::endl;
-                return;
+                rte_pktmbuf_free(pkt);
+                incTxDropStats(1);
+                continue;
             }
             ether_addr_copy(dstAddr, &tunnelHdr->dAddr);
             ether_addr_copy(srcAddr, &tunnelHdr->sAddr);
@@ -345,4 +360,3 @@ ddAccessPort::handleTx()
         incTxStats(sent);
     }
 }
-
